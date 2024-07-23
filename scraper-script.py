@@ -114,6 +114,6 @@ def process_folder(folder_path, output_file):
 
 # Main execution
 if __name__ == "__main__":
-    folder_path = "small-test"  # Replace with your folder path
+    folder_path = "path/to/your/image/folder"  # Replace with your folder path
     output_file = "album_data.csv"  # Replace with your desired output file name
     process_folder(folder_path, output_file)
