@@ -1,74 +1,119 @@
 import os
+import csv
+import re
 import easyocr
-import pandas as pd
-import spacy
+import numpy as np
+from PIL import Image
 
 # Initialize EasyOCR reader
 reader = easyocr.Reader(['en'])
 
-# Load the spaCy model
-nlp = spacy.load("en_core_web_sm")
-
 def extract_text_from_image(image_path):
-    """Extract text from an image using EasyOCR."""
-    result = reader.readtext(image_path, detail=0)
-    text = ' '.join(result)
-    print(f"Extracted text from {image_path}: {text}")  # DEBUGGING
-    return text
-
-
-def categorize_text_spacy(text):
-    """Categorize text using spaCy's Named Entity Recognition (NER)."""
-    doc = nlp(text)
-    artist = ""
-    album = ""
+    """Extract text from an image using EasyOCR, treating each spine as a single line."""
+    image = Image.open(image_path)
+    result = reader.readtext(np.array(image))
     
-    print(f"Text to categorize: {text}")  # DEBUGGING
-    
-    for ent in doc.ents:
-        if ent.label_ in {"PERSON", "ORG", "GPE"}:  # Assuming artists/bands can be PERSON, ORG, or GPE
-            if not artist:  # Prioritize the first match as the artist
-                artist = ent.text
-        elif ent.label_ in {"WORK_OF_ART", "PRODUCT", "EVENT"}:  # Albums might be WORK_OF_ART, PRODUCT, or EVENT
-            if not album:  # Prioritize the first match as the album
-                album = ent.text
-    
-    # Fallback rules if NER fails to identify correctly
-    if not artist and text:
-        lines = text.split('\n')
-        if len(lines) > 0:
-            artist = lines[0]  # Assume the first line is the artist/band name
-        if len(lines) > 1:
-            album = lines[1]  # Assume the second line is the album title
-    
-    print(f"Categorized Artist: {artist}, Album: {album}")  # DEBUG
-    
-    return artist, album
+    if not result:
+        print(f"No text detected in {image_path}")
+        return ""
 
+    # Sort detections by y-coordinate (top to bottom)
+    sorted_result = sorted(result, key=lambda x: x[0][0][1])
 
-def process_images_in_directory(directory):
-    """Process all images in a directory and return a list of dictionaries with artist and album information."""
-    records = []
-    for filename in os.listdir(directory):
-        if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tiff')):
-            image_path = os.path.join(directory, filename)
-            text = extract_text_from_image(image_path)
-            artist, album = categorize_text_spacy(text)
-            if artist or album:  # Ensure at least one is found
-                records.append({'Filename': filename, 'Artist': artist, 'Album': album})
-    return records
+    lines = []
+    current_line = []
+    prev_y = None
+    y_threshold = image.size[1] * 0.03  # 3% of image height
 
-def save_to_csv(records, output_file):
-    """Save the records to a CSV file."""
-    df = pd.DataFrame(records)
-    df.to_csv(output_file, index=False)
+    for detection in sorted_result:
+        bbox, text, conf = detection
+        current_y = (bbox[0][1] + bbox[2][1]) / 2  # Middle y-coordinate
 
-# Main script
+        if prev_y is None or abs(current_y - prev_y) > y_threshold:
+            if current_line:
+                lines.append(' '.join(current_line))
+            current_line = [text]
+        else:
+            current_line.append(text)
+
+        prev_y = current_y
+
+    if current_line:
+        lines.append(' '.join(current_line))
+
+    return '\n'.join(lines)
+
+def categorize_text(text):
+    """Categorize text into artist and album."""
+    lines = text.split('\n')
+    results = []
+
+    for line in lines:
+        print(f"Line to categorize: {line}")  # DEBUGGING
+        
+        # Try to split based on common separators or multiple spaces
+        parts = re.split(r'\s{2,}|:|-', line, 1)
+        
+        if len(parts) >= 2:
+            artist = parts[0].strip()
+            album = parts[1].strip()
+        else:
+            # If we can't split, use more sophisticated heuristics
+            words = line.split()
+            if len(words) > 2:
+                # Assume last half is the album title
+                mid = len(words) // 2
+                artist = ' '.join(words[:mid])
+                album = ' '.join(words[mid:])
+            else:
+                artist = line
+                album = ""
+
+        # Handle special cases
+        if "PRESENTS:" in line:
+            artist, album = line.split("PRESENTS:", 1)
+            artist = artist.strip()
+            album = "PRESENTS: " + album.strip()
+
+        print(f"Categorized Artist: {artist}, Album: {album}")  # DEBUG
+        results.append((artist, album))
+    
+    return results
+
+def process_image(image_path):
+    """Process a single image and return results."""
+    text = extract_text_from_image(image_path)
+    return categorize_text(text)
+
+def write_to_csv(all_results, output_file):
+    """Write all results to a single CSV file."""
+    with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(['Image', 'Artist', 'Album'])  # Header
+        for image, results in all_results:
+            for artist, album in results:
+                writer.writerow([image, artist, album])
+    print(f"Results written to {output_file}")
+
+def process_folder(folder_path, output_file):
+    """Process all images in a folder and write results to CSV."""
+    all_results = []
+    for filename in os.listdir(folder_path):
+        if filename.lower().endswith(('.png', '.jpg', '.jpeg', '.tiff', '.bmp', '.gif')):
+            image_path = os.path.join(folder_path, filename)
+            print(f"Processing {image_path}")
+            results = process_image(image_path)
+            print(f"Results for {filename}: {results}")  # Debug print
+            all_results.append((filename, results))
+    
+    print(f"Total images processed: {len(all_results)}")  # Debug print
+    for image, results in all_results:
+        print(f"{image}: {len(results)} results")  # Debug print
+    
+    write_to_csv(all_results, output_file)
+
+# Main execution
 if __name__ == "__main__":
-    input_directory = "images"  # Update with the path to your image directory
-    output_file = "vinyl_collection.csv"
-    
-    records = process_images_in_directory(input_directory)
-    save_to_csv(records, output_file)
-    
-    print(f"CSV file '{output_file}' has been created with the vinyl collection data.")
+    folder_path = "small-test"  # Replace with your folder path
+    output_file = "album_data.csv"  # Replace with your desired output file name
+    process_folder(folder_path, output_file)
